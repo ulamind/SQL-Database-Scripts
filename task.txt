@@ -1,10 +1,10 @@
 CREATE PROCEDURE syn.usp_ImportFileCustomerSeasonal
-    @ID_Record int
+    @ID_Record INT
 AS
 BEGIN
     SET NOCOUNT ON;
-
-    DECLARE @ErrorMessage VARCHAR(MAX);
+    DECLARE @RowCount INT = (SELECT COUNT(*) FROM syn.SA_CustomerSeasonal);
+    DECLARE @ErrorMessage VARCHAR(MAX) = '';
 
     -- Проверка на корректность загрузки
     IF NOT EXISTS (
@@ -70,46 +70,61 @@ BEGIN
         OR TRY_CAST(ISNULL(cs.FlagActive, 0) AS BIT) IS NULL;
 
     -- Обработка данных из файла
-    MERGE INTO syn.CustomerSeasonal AS cs
-    USING (
-        SELECT
-            cs_temp.ID_dbo_Customer,
-            cs_temp.ID_CustomerSystemType,
-            cs_temp.ID_Season,
-            cs_temp.DateBegin,
-            cs_temp.DateEnd,
-            cs_temp.ID_dbo_CustomerDistributor,
-            cs_temp.FlagActive
-        FROM #CustomerSeasonal AS cs_temp
-    ) AS s ON s.ID_dbo_Customer = cs.ID_dbo_Customer
-        AND s.ID_Season = cs.ID_Season
-        AND s.DateBegin = cs.DateBegin
-    WHEN MATCHED AND cs.ID_CustomerSystemType <> s.ID_CustomerSystemType THEN
-        UPDATE
-        SET ID_CustomerSystemType = s.ID_CustomerSystemType,
-            DateEnd = s.DateEnd,
-            ID_dbo_CustomerDistributor = s.ID_dbo_CustomerDistributor,
-            FlagActive = s.FlagActive
-    WHEN NOT MATCHED THEN
-        INSERT (ID_dbo_Customer, ID_CustomerSystemType, ID_Season, DateBegin, DateEnd, ID_dbo_CustomerDistributor, FlagActive)
-        VALUES (s.ID_dbo_Customer, s.ID_CustomerSystemType, s.ID_Season, s.DateBegin, s.DateEnd, s.ID_dbo_CustomerDistributor, s.FlagActive);
+    BEGIN TRANSACTION;
+    BEGIN TRY
+        MERGE INTO syn.CustomerSeasonal AS cs
+        USING (
+            SELECT
+                cs_temp.ID_dbo_Customer,
+                cs_temp.ID_CustomerSystemType,
+                cs_temp.ID_Season,
+                cs_temp.DateBegin,
+                cs_temp.DateEnd,
+                cs_temp.ID_dbo_CustomerDistributor,
+                cs_temp.FlagActive
+            FROM #CustomerSeasonal AS cs_temp
+        ) AS s ON s.ID_dbo_Customer = cs.ID_dbo_Customer
+            AND s.ID_Season = cs.ID_Season
+            AND s.DateBegin = cs.DateBegin
+        WHEN MATCHED
+            AND cs.ID_CustomerSystemType <> s.ID_CustomerSystemType THEN
+            UPDATE
+            SET ID_CustomerSystemType = s.ID_CustomerSystemType,
+                DateEnd = s.DateEnd,
+                ID_dbo_CustomerDistributor = s.ID_dbo_CustomerDistributor,
+                FlagActive = s.FlagActive
+        WHEN NOT MATCHED THEN
+            INSERT (ID_dbo_Customer, ID_CustomerSystemType, ID_Season, DateBegin, DateEnd, ID_dbo_CustomerDistributor, FlagActive)
+            VALUES (s.ID_dbo_Customer, s.ID_CustomerSystemType, s.ID_Season, s.DateBegin, s.DateEnd, s.ID_dbo_CustomerDistributor, s.FlagActive);
 
-    -- Информационное сообщение
-    SELECT @ErrorMessage = CONCAT('Обработано строк: ', (SELECT COUNT(*) FROM syn.SA_CustomerSeasonal));
-    RAISEERROR(@ErrorMessage, 10, 1);
+        COMMIT TRANSACTION;
 
-    -- Формирование таблицы для отчетности
-    SELECT TOP 100
-        bir.Season AS 'Сезон',
-        bir.UID_DS_Customer AS 'UID Клиента',
-        bir.Customer AS 'Клиент',
-        bir.CustomerSystemType AS 'Тип клиента',
-        bir.UID_DS_CustomerDistributor AS 'UID Дистрибьютора',
-        bir.CustomerDistributor AS 'Дистрибьютор',
-        ISNULL(FORMAT(TRY_CAST(bir.DateBegin AS DATE), 'dd.MM.yyyy', 'ru-RU'), bir.DateBegin) AS 'Дата начала',
-        ISNULL(FORMAT(TRY_CAST(bir.DateEnd AS DATE), 'dd.MM.yyyy', 'ru-RU'), bir.DateEnd) AS 'Дата окончания',
-        bir.FlagActive AS 'Активность',
-        bir.Reason AS 'Причина'
-    FROM #BadInsertedRows AS bir;
+        -- Информационное сообщение
+        SET @ErrorMessage = CONCAT('Обработано строк: ', @RowCount);
+        RAISEERROR(@ErrorMessage, 0, 1);
 
-END;
+        -- Формирование таблицы для отчетности
+        SELECT TOP 100
+            bir.Season AS 'Сезон',
+            bir.UID_DS_Customer AS 'UID Клиента',
+            bir.Customer AS 'Клиент',
+            bir.CustomerSystemType AS 'Тип клиента',
+            bir.UID_DS_CustomerDistributor AS 'UID Дистрибьютора',
+            bir.CustomerDistributor AS 'Дистрибьютор',
+            ISNULL(FORMAT(TRY_CAST(bir.DateBegin AS DATE), 'dd.MM.yyyy', 'ru-RU'), bir.DateBegin) AS 'Дата начала',
+            ISNULL(FORMAT(TRY_CAST(bir.DateEnd AS DATE), 'dd.MM.yyyy', 'ru-RU'), bir.DateEnd) AS 'Дата окончания',
+            bir.FlagActive AS 'Активность',
+            bir.Reason AS 'Причина'
+        FROM #BadInsertedRows AS bir;
+
+        RETURN;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+
+        DECLARE @ErrorMessage NVARCHAR(MAX) = ERROR_MESSAGE();
+        RAISEERROR(@ErrorMessage, 16, 1);
+        RETURN;
+    END CATCH;
+END
